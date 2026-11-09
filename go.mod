@@ -142,3 +142,5 @@ require (
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+replace github.com/jcmturner/gokrb5/v8 => github.com/AlexGromer/gokrb5/v8 v8.4.5-ebridge.1
