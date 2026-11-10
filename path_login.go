@@ -18,6 +18,7 @@ import (
 	"github.com/hashicorp/vault/sdk/helper/cidrutil"
 	"github.com/hashicorp/vault/sdk/helper/ldaputil"
 	"github.com/hashicorp/vault/sdk/logical"
+	"github.com/jcmturner/gokrb5/v8/credentials"
 	"github.com/jcmturner/gokrb5/v8/keytab"
 	"github.com/jcmturner/gokrb5/v8/service"
 	"github.com/jcmturner/gokrb5/v8/spnego"
@@ -128,6 +129,7 @@ func (b *backend) pathLoginUpdate(ctx context.Context, req *logical.Request, d *
 	// successful. Let's use it to record success, and to retrieve the caller's
 	// identity.
 	username := ""
+	aliasName := ""
 	authenticated := false
 	var identity goidentity.Identity
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -145,10 +147,17 @@ func (b *backend) pathLoginUpdate(ctx context.Context, req *logical.Request, d *
 			return
 		}
 		b.Logger().Debug(fmt.Sprintf("identity: %+v", identity))
-		username = identity.UserName()
+		name, err := loginName(identity, kerbCfg.UsePrincipalName)
+		if err != nil {
+			w.WriteHeader(400)
+			_, _ = w.Write([]byte(err.Error()))
+			return
+		}
+		username = name
+		aliasName = name
 
 		if kerbCfg.RemoveInstanceName {
-			user := splitUsername(identity.UserName())
+			user := splitUsername(name)
 			if len(user) > 1 {
 				username = user[0]
 			}
@@ -267,11 +276,11 @@ func (b *backend) pathLoginUpdate(ctx context.Context, req *logical.Request, d *
 	auth := &logical.Auth{
 		InternalData: map[string]interface{}{},
 		Metadata: map[string]string{
-			"user":   identity.UserName(),
+			"user":   aliasName,
 			"domain": identity.Domain(),
 		},
-		DisplayName: identity.UserName(),
-		Alias:       &logical.Alias{Name: identity.UserName()},
+		DisplayName: aliasName,
+		Alias:       &logical.Alias{Name: aliasName},
 	}
 
 	ldapCfg.PopulateTokenAuth(auth)
@@ -321,4 +330,20 @@ func (w *simpleResponseWriter) Write(b []byte) (int, error) {
 
 func (w *simpleResponseWriter) WriteHeader(statusCode int) {
 	w.statusCode = statusCode
+}
+
+// loginName returns the name used for the LDAP lookup and the entity alias.
+// By default it is the identity's user name, which gokrb5 replaces with the PAC
+// effective name when the ticket carries a PAC. With usePrincipalName it is the
+// client principal name of the ticket: FreeIPA puts the host FQDN, not
+// host/<fqdn>, into the PAC of a host principal.
+func loginName(identity goidentity.Identity, usePrincipalName bool) (string, error) {
+	if !usePrincipalName {
+		return identity.UserName(), nil
+	}
+	creds, ok := identity.(*credentials.Credentials)
+	if !ok {
+		return "", fmt.Errorf("identity of type %T carries no client principal", identity)
+	}
+	return creds.CName().PrincipalNameString(), nil
 }
